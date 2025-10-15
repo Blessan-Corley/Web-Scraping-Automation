@@ -1,0 +1,54 @@
+{
+  "portal": {
+    "base_url": "https://portal.kitcbe.com/index.php/Login",
+    "password": "YOUR_PASSWORD_HERE"
+  },
+  
+  "departments": {
+    "aids": {
+      "name": "Artificial Intelligence and Data Science",
+      "prefix": "711524BAD",
+      "start": 1,
+      "end": 180
+    },
+    "cse": {
+      "name": "Computer Science Engineering",
+      "prefix": "712524BCS",
+      "start": 1,
+      "end": 180
+    },
+    "ece": {
+      "name": "Electronics and Communication Engineering",
+      "prefix": "713524BEC",
+      "start": 1,
+      "end": 120
+    },
+    "mech": {
+      "name": "Mechanical Engineering",
+      "prefix": "714524BME",
+      "start": 1,
+      "end": 100
+    },
+    "civil": {
+      "name": "Civil Engineering",
+      "prefix": "715524BCV",
+      "start": 1,
+      "end": 80
+    }
+  },
+  
+  "output": {
+    "directory": "output_data"
+  },
+  
+  "selenium": {
+    "implicit_wait": 15,
+    "page_load_timeout": 30,
+    "retry_attempts": 3
+  },
+  
+  "captcha": {
+    "max_retries": 3,
+    "confidence_threshold": 0.5
+  }
+}
