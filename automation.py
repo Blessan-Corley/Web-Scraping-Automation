@@ -1,6 +1,6 @@
 """
 KIT Portal Student Data Automation - FULLY FIXED VERSION
-All selectors corrected based on actual portal structure
+Fixed: Login button click issue - now uses multiple click strategies
 """
 
 import time
@@ -16,7 +16,7 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementNotInteractableException, ElementClickInterceptedException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.action_chains import ActionChains
 import easyocr
@@ -82,13 +82,69 @@ class KITPortalAutomation:
         self.driver.implicitly_wait(10)
         logger.info("WebDriver initialized successfully")
     
+    def preprocess_captcha_image(self, input_path: str) -> str:
+        """Preprocess CAPTCHA image for better OCR - handles overlapping text"""
+        try:
+            from PIL import Image, ImageEnhance, ImageFilter
+            import cv2
+            import numpy as np
+            
+            # Load image
+            img = Image.open(input_path)
+            
+            # Convert to RGB
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # Resize for better OCR (2x larger)
+            width, height = img.size
+            img = img.resize((width * 2, height * 2), Image.Resampling.LANCZOS)
+            
+            # Enhance contrast aggressively
+            enhancer = ImageEnhance.Contrast(img)
+            img = enhancer.enhance(3.0)
+            
+            # Convert to grayscale
+            img = img.convert('L')
+            
+            # Convert to numpy for OpenCV processing
+            img_array = np.array(img)
+            
+            # Apply bilateral filter to reduce noise while keeping edges
+            img_array = cv2.bilateralFilter(img_array, 9, 75, 75)
+            
+            # Adaptive threshold - handles varying lighting
+            img_array = cv2.adaptiveThreshold(
+                img_array, 255,
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY, 11, 2
+            )
+            
+            # Invert if background is dark
+            if np.mean(img_array) < 127:
+                img_array = cv2.bitwise_not(img_array)
+            
+            # Morphological operations to clean up
+            kernel = np.ones((2, 2), np.uint8)
+            img_array = cv2.morphologyEx(img_array, cv2.MORPH_CLOSE, kernel)
+            
+            # Save processed image
+            processed_path = 'captcha_processed.png'
+            cv2.imwrite(processed_path, img_array)
+            
+            return processed_path
+            
+        except Exception as e:
+            logger.warning(f"Image preprocessing failed: {e}, using original")
+            return input_path
+    
     def solve_captcha(self, max_retries: int = 3) -> Optional[str]:
-        """Solve CAPTCHA using OCR"""
+        """Solve CAPTCHA using OCR with preprocessing"""
         for attempt in range(max_retries):
             try:
                 time.sleep(1)
                 
-                # FIXED: Use exact selector from diagnostic
+                # Find CAPTCHA image
                 captcha_img = self.driver.find_element(By.XPATH, 
                     "//img[contains(@src, 'captcha_images')]")
                 
@@ -101,21 +157,61 @@ class KITPortalAutomation:
                 captcha_img.screenshot(captcha_filename)
                 logger.info(f"CAPTCHA screenshot saved: {captcha_filename}")
                 
-                # Read with OCR
-                result = self.reader.readtext(captcha_filename, detail=0)
+                # Preprocess image for better OCR
+                processed_path = self.preprocess_captcha_image(captcha_filename)
                 
-                if result:
-                    captcha_text = ''.join(result).strip()
-                    # Clean up - remove spaces and special chars
-                    captcha_text = re.sub(r'[^A-Za-z0-9]', '', captcha_text)
+                # Try OCR with multiple configurations
+                results = []
+                
+                # Method 1: Default EasyOCR
+                result1 = self.reader.readtext(processed_path, detail=0)
+                if result1:
+                    text1 = ''.join(result1).strip()
+                    text1 = re.sub(r'[^A-Za-z0-9]', '', text1)
+                    if text1:
+                        results.append(text1)
+                
+                # Method 2: With allowlist (only letters and numbers)
+                result2 = self.reader.readtext(
+                    processed_path, 
+                    detail=0,
+                    allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+                )
+                if result2:
+                    text2 = ''.join(result2).strip()
+                    text2 = re.sub(r'[^A-Za-z0-9]', '', text2)
+                    if text2:
+                        results.append(text2)
+                
+                # Method 3: Try original image too
+                result3 = self.reader.readtext(captcha_filename, detail=0)
+                if result3:
+                    text3 = ''.join(result3).strip()
+                    text3 = re.sub(r'[^A-Za-z0-9]', '', text3)
+                    if text3:
+                        results.append(text3)
+                
+                # Choose best result (prefer length 4-5)
+                valid_results = [r for r in results if 4 <= len(r) <= 6]
+                
+                if valid_results:
+                    # Pick most common result if multiple
+                    from collections import Counter
+                    counter = Counter(valid_results)
+                    captcha_text = counter.most_common(1)[0][0]
                     
-                    if len(captcha_text) >= 4:
-                        logger.info(f"CAPTCHA solved: {captcha_text}")
+                    logger.info(f"CAPTCHA solved: {captcha_text} (attempt {attempt + 1})")
+                    logger.debug(f"All results: {results}")
+                    return captcha_text
+                elif results:
+                    # Use longest result as fallback
+                    captcha_text = max(results, key=len)
+                    if len(captcha_text) >= 3:
+                        logger.info(f"CAPTCHA (fallback): {captcha_text}")
                         return captcha_text
-                    else:
-                        logger.warning(f"CAPTCHA too short: {captcha_text}")
-                else:
-                    logger.warning(f"OCR returned no results")
+                
+                logger.warning(f"No valid CAPTCHA result on attempt {attempt + 1}")
+                logger.debug(f"Results: {results}")
                 
             except Exception as e:
                 logger.warning(f"CAPTCHA solve attempt {attempt + 1} failed: {e}")
@@ -124,32 +220,108 @@ class KITPortalAutomation:
         logger.error("Failed to solve CAPTCHA after all retries")
         return None
     
+    def click_login_button(self) -> bool:
+        """
+        Try multiple methods to click the login button
+        FIXED: Handles element not interactable error
+        """
+        try:
+            # Wait a bit for any animations/validations
+            time.sleep(1)
+            
+            # Method 1: Wait for button to be clickable
+            try:
+                logger.info("Attempting Method 1: Wait for clickable...")
+                login_btn = WebDriverWait(self.driver, 10).until(
+                    EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Login')]"))
+                )
+                
+                # Scroll into view
+                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", login_btn)
+                time.sleep(0.5)
+                
+                login_btn.click()
+                logger.info("✓ Login button clicked (Method 1)")
+                return True
+                
+            except (ElementNotInteractableException, ElementClickInterceptedException) as e:
+                logger.warning(f"Method 1 failed: {e}")
+            
+            # Method 2: JavaScript click
+            try:
+                logger.info("Attempting Method 2: JavaScript click...")
+                login_btn = self.driver.find_element(By.XPATH, "//button[contains(text(), 'Login')]")
+                self.driver.execute_script("arguments[0].click();", login_btn)
+                logger.info("✓ Login button clicked (Method 2 - JS)")
+                return True
+                
+            except Exception as e:
+                logger.warning(f"Method 2 failed: {e}")
+            
+            # Method 3: ActionChains
+            try:
+                logger.info("Attempting Method 3: ActionChains...")
+                login_btn = self.driver.find_element(By.XPATH, "//button[contains(text(), 'Login')]")
+                actions = ActionChains(self.driver)
+                actions.move_to_element(login_btn).click().perform()
+                logger.info("✓ Login button clicked (Method 3 - Actions)")
+                return True
+                
+            except Exception as e:
+                logger.warning(f"Method 3 failed: {e}")
+            
+            # Method 4: Try by class name
+            try:
+                logger.info("Attempting Method 4: By class name...")
+                login_btn = self.driver.find_element(By.CSS_SELECTOR, "button.login100-form-btn")
+                self.driver.execute_script("arguments[0].click();", login_btn)
+                logger.info("✓ Login button clicked (Method 4 - Class)")
+                return True
+                
+            except Exception as e:
+                logger.warning(f"Method 4 failed: {e}")
+            
+            # Method 5: Submit form directly
+            try:
+                logger.info("Attempting Method 5: Submit form...")
+                form = self.driver.find_element(By.TAG_NAME, "form")
+                form.submit()
+                logger.info("✓ Form submitted (Method 5)")
+                return True
+                
+            except Exception as e:
+                logger.warning(f"Method 5 failed: {e}")
+            
+            logger.error("All click methods failed!")
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error in click_login_button: {e}")
+            return False
+    
     def login(self, roll_number: str) -> bool:
-        """Login to portal - FIXED with correct selectors"""
+        """Login to portal - FIXED with improved click handling"""
         try:
             self.driver.get(self.base_url)
             time.sleep(3)
             
-            # FIXED: Wait for login form to be present
+            # Wait for login form to be present
             WebDriverWait(self.driver, 15).until(
                 EC.presence_of_element_located((By.ID, "username"))
             )
             
-            # FIXED: Use ID selector - INPUT #13 from diagnostic
+            # Enter username
             logger.info("Finding username field...")
             roll_input = WebDriverWait(self.driver, 10).until(
                 EC.element_to_be_clickable((By.ID, "username"))
             )
-            
-            # Remove readonly attribute if present
-            self.driver.execute_script("arguments[0].removeAttribute('readonly')", roll_input)
             
             roll_input.clear()
             time.sleep(0.5)
             roll_input.send_keys(roll_number)
             logger.info(f"✓ Roll number entered: {roll_number}")
             
-            # FIXED: Use ID selector - INPUT #14 from diagnostic (password1, not password)
+            # Enter password
             logger.info("Finding password field...")
             password_input = WebDriverWait(self.driver, 10).until(
                 EC.element_to_be_clickable((By.ID, "password1"))
@@ -166,7 +338,7 @@ class KITPortalAutomation:
                 logger.error("CAPTCHA solving failed")
                 return False
             
-            # FIXED: Use ID selector - INPUT #15 from diagnostic
+            # Enter CAPTCHA
             logger.info("Finding CAPTCHA field...")
             captcha_input = WebDriverWait(self.driver, 10).until(
                 EC.element_to_be_clickable((By.ID, "captcha"))
@@ -177,32 +349,16 @@ class KITPortalAutomation:
             captcha_input.send_keys(captcha_text)
             logger.info(f"✓ CAPTCHA entered: {captcha_text}")
             
+            # Extra wait for form validation
             time.sleep(1)
             
-            # FIXED: Click login button - BUTTON #5 from diagnostic
-            try:
-                login_btn = WebDriverWait(self.driver, 10).until(
-                    EC.element_to_be_clickable((By.XPATH, 
-                        "//button[contains(@class, 'login100-form-btn') and contains(text(), 'Login')]"))
-                )
-                
-                # Scroll into view
-                self.driver.execute_script("arguments[0].scrollIntoView(true);", login_btn)
-                time.sleep(0.5)
-                
-                # Try normal click first
-                try:
-                    login_btn.click()
-                    logger.info("✓ Login button clicked")
-                except:
-                    # Fallback to JavaScript click
-                    self.driver.execute_script("arguments[0].click();", login_btn)
-                    logger.info("✓ Login button clicked (JS)")
-                    
-            except Exception as e:
-                logger.error(f"Could not click login button: {e}")
+            # Click login button with improved method
+            if not self.click_login_button():
+                logger.error("Failed to click login button")
+                self.driver.save_screenshot(f"login_click_failed_{roll_number}.png")
                 return False
             
+            # Wait for page to load
             time.sleep(5)
             
             # Check if login successful
@@ -334,9 +490,17 @@ class KITPortalAutomation:
                 )
                 self.driver.execute_script("arguments[0].scrollIntoView(true);", profile_elem)
                 time.sleep(0.5)
-                profile_elem.click()
-                profile_clicked = True
-                logger.info("Clicked profile area (method 1)")
+                
+                # Try normal click first
+                try:
+                    profile_elem.click()
+                    profile_clicked = True
+                    logger.info("Clicked profile area (method 1)")
+                except:
+                    # Fallback to JS click
+                    self.driver.execute_script("arguments[0].click();", profile_elem)
+                    profile_clicked = True
+                    logger.info("Clicked profile area (method 1 - JS)")
             except:
                 pass
             
@@ -345,27 +509,14 @@ class KITPortalAutomation:
                 try:
                     profile_img = self.driver.find_element(By.XPATH, 
                         "//img[contains(@alt, 'profile') or contains(@class, 'profile')]")
-                    profile_img.click()
+                    self.driver.execute_script("arguments[0].click();", profile_img)
                     profile_clicked = True
                     logger.info("Clicked profile area (method 2)")
                 except:
                     pass
             
-            # Method 3: Look for any clickable element with student info
-            if not profile_clicked:
-                try:
-                    # Try clicking the student name area
-                    student_area = self.driver.find_element(By.XPATH, 
-                        "//*[contains(@class, 'user-info') or contains(@class, 'student')]")
-                    student_area.click()
-                    profile_clicked = True
-                    logger.info("Clicked profile area (method 3)")
-                except:
-                    pass
-            
             if not profile_clicked:
                 logger.error("Could not click profile area")
-                # Take screenshot for debugging
                 self.driver.save_screenshot("profile_navigation_failed.png")
                 return False
             
@@ -377,8 +528,16 @@ class KITPortalAutomation:
                     EC.element_to_be_clickable((By.XPATH, 
                         "//a[contains(text(), 'Profile Details') or contains(text(), 'Profile')]"))
                 )
-                profile_link.click()
-                logger.info("Clicked 'Profile Details' link")
+                
+                # Try normal click first
+                try:
+                    profile_link.click()
+                    logger.info("Clicked 'Profile Details' link")
+                except:
+                    # Fallback to JS click
+                    self.driver.execute_script("arguments[0].click();", profile_link)
+                    logger.info("Clicked 'Profile Details' link (JS)")
+                    
             except Exception as e:
                 logger.error(f"Could not click Profile Details link: {e}")
                 self.driver.save_screenshot("profile_dropdown_failed.png")
@@ -557,14 +716,14 @@ class KITPortalAutomation:
             try:
                 profile_elem = self.driver.find_element(By.XPATH, 
                     "//*[contains(@class, 'profile') or contains(text(), 'STUDENTS')]")
-                profile_elem.click()
+                self.driver.execute_script("arguments[0].click();", profile_elem)
                 time.sleep(1)
             except:
                 try:
                     imgs = self.driver.find_elements(By.TAG_NAME, "img")
                     for img in imgs:
                         if img.size['height'] < 100:
-                            img.click()
+                            self.driver.execute_script("arguments[0].click();", img)
                             time.sleep(1)
                             break
                 except:
@@ -573,10 +732,10 @@ class KITPortalAutomation:
             # Click logout
             try:
                 logout_link = WebDriverWait(self.driver, 5).until(
-                    EC.element_to_be_clickable((By.XPATH, 
+                    EC.presence_of_element_located((By.XPATH, 
                         "//a[contains(text(), 'Logout') or contains(text(), 'logout')]"))
                 )
-                logout_link.click()
+                self.driver.execute_script("arguments[0].click();", logout_link)
                 time.sleep(2)
                 logger.info("✓ Logged out successfully")
             except:
