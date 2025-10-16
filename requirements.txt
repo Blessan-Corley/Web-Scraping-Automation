@@ -1,10 +1,18 @@
+# Core automation
 selenium==4.15.2
+
+# OCR (fallback only)
 easyocr==1.7.1
+
+# Data processing
 pandas==2.1.4
 openpyxl==3.1.2
+
+# Image handling
 Pillow==10.1.0
+
+# HTTP requests
 requests==2.31.0
-torch==2.1.1
-torchvision==0.16.1
-opencv-python==4.8.1.78
-numpy==1.24.3
+
+# Note: Google Vision API uses REST API (requests library)
+# No additional library needed for Google Vision!
